@@ -3,3 +3,6 @@ data/
 poc/
 .DS_Store
 *.log
+
+*.bak-*
+*.tgz

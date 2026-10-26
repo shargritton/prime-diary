@@ -1,6 +1,6 @@
 {
   "name": "dsh-prime-diary",
-  "version": "0.10.15",
+  "version": "0.10.16",
   "description": "为 dsh-prime-memory 增加每日日记、重要记忆筛选与草稿审阅的伴生插件",
   "type": "module",
   "main": "index.js",

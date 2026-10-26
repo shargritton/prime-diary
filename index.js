@@ -19,6 +19,7 @@ const RPC = 'prime-diary'
 const DEFAULTS = {
   enabled: true,
   intervalDays: 1,
+  dailyAt: '23:00',
   contextThreshold: 85,
   contextCheckMinutes: 15,
   autoSnapshot: true,
@@ -98,6 +99,12 @@ function saveConfig(patch) {
   else next.includedSessions = null
   delete next.excludedSessions
   next.intervalDays = Math.min(7, Math.max(1, Math.round(Number(next.intervalDays) || 1)))
+  const prevCfg = loadConfig()
+  const wantDailyAt = normalizeDailyAt(next.dailyAt)
+  const scheduleChanged = wantDailyAt !== normalizeDailyAt(prevCfg.dailyAt) ||
+    next.intervalDays !== Math.max(1, Math.round(Number(prevCfg.intervalDays) || 1))
+  next.dailyAt = wantDailyAt
+  next.scheduleAnchor = scheduleChanged ? localDay(Date.now()) : anchorDateOf(next)
   next.contextThreshold = Math.min(100, Math.max(0, Number(next.contextThreshold) || 0))
   next.contextCheckMinutes = Math.min(1440, Math.max(1, Math.round(Number(next.contextCheckMinutes) || 15)))
   next.autoSnapshot = next.autoSnapshot !== false
@@ -128,6 +135,41 @@ function loadState() {
   return { lastRunAt: 0, nextAt: 0, lastSkip: 0, lastError: '', ...readJson(STATE_FILE(), {}) }
 }
 function saveState(state) { writeJson(STATE_FILE(), state) }
+
+// ── 固定时刻调度 ────────────────────────────────────────────────────────────
+// 语义：锚点日(YYYY-MM-DD) + 每 intervalDays 天的 dailyAt(HH:mm) 即为一个生成时刻。
+// 自动生成后**不回写锚点**，因此时刻永远对齐，不会越跑越漂。
+// 「立即生成」不触碰 lastRunAt / nextAt / 锚点（2026-10-26 产品方要求）。
+function normalizeDailyAt(v) {
+  const m = /^(\d{1,2}):(\d{1,2})$/.exec(String(v ?? '').trim())
+  if (!m) return '23:00'
+  const h = Math.min(23, Math.max(0, parseInt(m[1], 10)))
+  const mi = Math.min(59, Math.max(0, parseInt(m[2], 10)))
+  return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`
+}
+function anchorDateOf(cfg) {
+  const a = String(cfg?.scheduleAnchor ?? '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(a)) return a
+  return localDay(Date.now())
+}
+function slotMsOf(dateStr, dailyAt) {
+  const [h, mi] = normalizeDailyAt(dailyAt).split(':').map(Number)
+  const d = new Date(`${dateStr}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return NaN
+  d.setHours(h, mi, 0, 0)
+  return d.getTime()
+}
+function nextSlotFrom(now, cfg) {
+  const step = Math.max(1, Math.round(Number(cfg?.intervalDays) || 1)) * 86400000
+  const base = slotMsOf(anchorDateOf(cfg), cfg?.dailyAt)
+  if (!Number.isFinite(base)) return now + step
+  if (base > now) return base
+  const k = Math.floor((now - base) / step) + 1
+  return base + k * step
+}
+function scheduleSignature(cfg) {
+  return `${normalizeDailyAt(cfg?.dailyAt)}|${Math.max(1, Math.round(Number(cfg?.intervalDays) || 1))}|${anchorDateOf(cfg)}`
+}
 
 const PRIME_DB = () => path.join(HOME(), 'memory', 'memory.db')
 const BACKUP_DIR = () => path.join(DATA(), 'backups')
@@ -603,7 +645,7 @@ async function generate(ctx, force = false, testMode = false, testSample = '') {
   }
   if (!force && Math.random() < cfg.skipProbability) {
     state.lastSkip = now
-    state.nextAt = now + cfg.intervalDays * 86400000
+    state.nextAt = nextSlotFrom(now, cfg)
     state.lastError = ''
     saveState(state)
     return { ok: true, skipped: true }
@@ -635,8 +677,11 @@ async function generate(ctx, force = false, testMode = false, testSample = '') {
   fs.writeFileSync(path.join(DRAFTS(), `${date}.md`),
     `# ${date} 日记\n\n${diary}\n\n## 重要记忆候选\n\n` +
     (memories.length ? memories.map(m => `- [${m.type}] ${m.content}（重要度 ${m.importance.toFixed(2)}）`).join('\n') : '（无）') + '\n')
-  state.lastRunAt = now
-  state.nextAt = now + cfg.intervalDays * 86400000
+  if (!force) {
+    // 只有自动生成才推进调度与取材窗口；「立即生成」一概不动（2026-10-26 产品方要求）
+    state.lastRunAt = now
+    state.nextAt = nextSlotFrom(now, cfg)
+  }
   state.lastError = ''
   if (cfg.diaryBookEnabled) {
     try { const b = updateDiaryBook(date, draft); state.lastDiaryBook = { at: Date.now(), path: b.path, entries: b.entries }; dbg('diary book: ' + b.path) }
@@ -1035,7 +1080,7 @@ export function apply(ctx) {
   dbg('apply start')
   const state = loadState()
   if (!state.nextAt) {
-    state.nextAt = Date.now() + loadConfig().intervalDays * 86400000
+    state.nextAt = nextSlotFrom(Date.now(), loadConfig())
     saveState(state)
   }
 
@@ -1102,8 +1147,15 @@ export function apply(ctx) {
           saveState(st0)
           try { await checkContext(ctx) } catch (err) { dbg('checkContext: ' + err) }
         }
-        const s = loadState()
-        if (Date.now() >= s.nextAt) await generate(ctx, false)
+        const st1 = loadState()
+        const sig = scheduleSignature(cfg)
+        if (!st1.nextAt || st1.scheduleSig !== sig) {
+          // 配置变了（时刻/间隔/锚点）就按新规则重排，不改锚点本身
+          st1.nextAt = nextSlotFrom(Date.now(), cfg)
+          st1.scheduleSig = sig
+          saveState(st1)
+        }
+        if (Date.now() >= st1.nextAt) await generate(ctx, false)
       } catch (err) { const st = loadState(); st.lastError = String(err?.message || err); saveState(st) }
       finally { running = false }
     }, 60 * 1000)
@@ -1111,4 +1163,4 @@ export function apply(ctx) {
   }, `${PLUGIN}: scheduler`)
 }
 
-export const __test = { scanSessions, readSession, walkSessionFiles }
+export const __test = { scanSessions, readSession, walkSessionFiles, nextSlotFrom, normalizeDailyAt, scheduleSignature }
