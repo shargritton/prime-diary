@@ -12,8 +12,29 @@
 |---|---|
 | DSH | 桌面端 / Web 端，宿主版本需支持 `dsh.bundle` 插件格式 |
 | Node | ≥ 22.19（用到 `zlib.zstdDecompressSync`） |
-| dsh-prime-memory | 已安装并启用；写入通道对应 0.26.x schema |
+| **dsh-prime-memory** | **必装**。本插件是它的伴生插件，直接读写它的记忆库 |
+| `sqlite3` 命令 | 系统 PATH 里要能执行 `sqlite3`（macOS 自带；Debian/Ubuntu 需 `apt install sqlite3`） |
 | 宿主依赖 | `@deepseek-ai/cordis` ^4、`@deepseek-ai/schemastery` ^3（由宿主提供） |
+| 可选 | `@node-rs/jieba`（装了就按词切分，没装则退化为逐字切分） |
+
+## 前置依赖：dsh-prime-memory
+
+这个插件不自己存记忆，日记和提炼出的条目最终都写进 **`dsh-prime-memory` 的记忆库**：
+
+```
+$DSH_HOME/memory/memory.db
+```
+
+所以请先装好 `dsh-prime-memory` 并让它正常跑起来（至少要有一份能打开的 `memory.db`）。
+
+- 写入方式是直接对库做 SQLite 事务：`l1_records` + `l1_fts` 两张表，列结构对应 prime 0.26.x
+- 每次写入前会自动 `VACUUM INTO` 备份到 `$DSH_HOME/prime-diary/backups/`
+- 按 `ext_key` 幂等：同一篇日记重复采纳不会重复入库
+- 设置页提供「写入通道自检」：复制一份库去试写并校验 FTS，不动正式数据
+- 如果没装 prime / 库不存在，采纳时会失败并提示 `prime memory.db 不存在: <路径>`；草稿不会丢，`pending-write` 载荷留在 `prime-diary/outbox/` 里等库恢复后重试
+
+写进去的记录会出现在 prime 的记忆检索里（`scene` 为 `日记/<日期>` 或 `快照/...`），
+所以装完之后用 prime 的记忆面板就能搜到日记内容。
 
 ## 安装
 
@@ -54,11 +75,14 @@ pnpm add github:shargritton/prime-diary
 
 | 路径 | 内容 |
 |---|---|
-| `drafts/<periodEnd>.json` / `.md` | 草稿与候选记忆 |
-| `diaries/<periodEnd>.md` | 已采纳的日记成品 |
+| `drafts/<date>.json` / `.md` | 草稿与候选记忆 |
+| `diaries/<date>.md` | 已采纳的日记成品 |
+| `outbox/<date>.json` | 待写入 prime 的载荷（`pending-write`），写入失败时留在这里 |
+| `digests/` | 会话提炼产物 |
 | `state.json` | 上次运行时间、偷懒记录、错误 |
 | `config.json` | UI 里改的配置 |
-| `backups/` | 写库前的备份 |
+| `backups/` | 写 prime 库前的备份（`VACUUM INTO`） |
+| `debug.log` | 调试日志 |
 
 ## 卸载
 
@@ -72,9 +96,11 @@ pnpm remove dsh-prime-diary
 
 ## 已知限制
 
-- 写入依赖 `dsh-prime-memory` 的 schema（0.26.x）。prime 升级改表时插件会做版本探测：探测失败则只落文件、不写库，并在日志里告警。
-- 会话文件（`session.v4.jsonl.zstd`）来自 `dsh-reference-session-collector`，格式变更会导致解析失败，该会话会被跳过并记日志。
+- 写入依赖 `dsh-prime-memory` 的 schema（当前对应 0.26.x）。插件**没有做版本探测**：prime 若改表，写入会直接报 SQL 错误，草稿会保留、载荷落在 `outbox/`，需要人工确认后用新表结构重试。装完建议先点一次设置页的「写入通道自检」。
+- 依赖系统的 `sqlite3` 命令行；没有它会直接报 `spawnSync sqlite3 ENOENT`。
+- 会话文件（`session.v4.jsonl.zstd`）来自 `dsh-reference-session-collector`，格式变更会导致解析失败，该会话被跳过并记日志。
 - 日记取材只取 user/assistant 文本，不含 reasoning 与工具输出。
+- 可选依赖 `@node-rs/jieba` 装不上不影响运行，只是分词退化、检索召回略差。
 
 ## License
 
