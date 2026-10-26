@@ -1,6 +1,6 @@
 {
   "name": "dsh-prime-diary",
-  "version": "0.10.14",
+  "version": "0.10.15",
   "description": "为 dsh-prime-memory 增加每日日记、重要记忆筛选与草稿审阅的伴生插件",
   "type": "module",
   "main": "index.js",
@@ -13,7 +13,8 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -32,6 +33,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/schemastery": "^3.0.0"
+  },
+  "optionalDependencies": {
+    "@node-rs/jieba": "^2.0.4"
   },
   "engines": {
     "node": ">=22.19"
